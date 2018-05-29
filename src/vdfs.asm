@@ -11,16 +11,20 @@
 ;            in ROM.
 :
 
-vdfsno  =   &11
-oswpb   =   &70
+vdfsno      =   &11
+oswpb       =   &70
 
-        ORG     &A8
-.romtab equw    &0000
-.romid  equb    &00
-.copywr equb    &00
-.dmpadd equw    &0000
-.dmpcnt equb    &00
-        
+romtab      =   &A8
+romid       =   &AA
+copywr      =   &AB
+
+dmpadd      =   &A8
+dmpcnt      =   &AA
+
+ltflag      =   &A8
+ltpchr      =   &A9
+lineno      =   &AA
+
 ClaimFS     =   &FC5C       :\ *FSCLAIM ON|OFF flag
 FSFlag      =   &FC5D       :\ FS id when claimed
 PORT_CMD    =   &FC5E       :\ execute cmds on VDFS in host
@@ -28,7 +32,7 @@ PORT_A      =   &FC5F       :\ store A ready for command.
 
 OS_CLI=&FFF7:OSBYTE=&FFF4:OSWORD=&FFF1:OSWRCH=&FFEE:OSNEWL=&FFE7:OSASCI=&FFE3
 OSFILE=&FFDD:OSARGS=&FFDA:OSBGET=&FFD7:OSBPUT=&FFD4:OSGBPB=&FFD1:OSFIND=&FFCE
-OSRDRM=&FFB9        
+OSRDRM=&FFB9:BRKV=&0202:EVNTV=&0220
 
 ORG     &8000
 .start
@@ -63,11 +67,12 @@ CMP #&04:BNE P%+5:JMP ServCommand  :\ *command
 CMP #&08:BNE P%+5:JMP ServOsword   :\ OSWORD
 CMP #&09:BNE P%+5:JMP ServHelp     :\ *DELETEHIMEM
 CMP #&0F:BNE P%+5:JMP ServVectors  :\ Vectors have changed
-CMP #&10:BNE P%+5:JMP ServShut     :\ Shut Spool/Exec
 CMP #&12:BNE P%+5:JMP ServFSSelect :\ Select a filing system
 CMP #&25:BNE P%+5:JMP ServFSInfo   :\ Request FS info
 CMP #&26:BNE P%+5:JMP ServShut     :\ Shut all channels
 CMP #&27:BNE P%+5:JMP ServReset    :\ Reset occured
+CMP #&FE:BNE P%+5:JMP TubeExplode  :\ Tube explode character set etc.
+CMP #&FF:BNE P%+5:JMP TubeInit     :\ Initialise tube host
 .ServExit
 PLA:TAY:PLA:TAX:PLA:PLP            :\ Restore all registers
 RTS
@@ -88,7 +93,7 @@ JSR OSWRCH:INX:BNE PrRTLp
 .PrRTDone
 RTS
 .PrROMVersion
-JSR PrSpace:INX
+JSR PrSpace
 .PrRVLp
 LDA ROMTitle,X:CMP #'!':BCC PrRVDone
 JSR OSWRCH:INX:BNE PrRVLp
@@ -149,8 +154,11 @@ EQUS "PAGE"   :EQUB 13:EQUW page
 EQUS "QUIT"   :EQUB 13:EQUW quit
 EQUS "DESKTOP":EQUB 13:EQUW quit
 EQUS "DUMP"   :EQUB 13:EQUW dump
+EQUS "LIST"   :EQUB 13:EQUW list
 EQUS "PAGE"   :EQUB 13:EQUW page
+EQUS "PRINT"  :EQUB 13:EQUW print
 EQUS "SHADOW" :EQUB 13:EQUW shadow
+EQUS "TYPE"   :EQUB 13:EQUW type
 EQUS "INSERT" :EQUB 13:EQUW insert
 \ SRAM commands
 EQUS "ROMS"   :EQUB 13:EQUW roms
@@ -178,7 +186,19 @@ JSR PrintText:JMP ServExit
 .HelpTitle
 JSR PrROMTitleNL            :\ Just print ROM title
 JSR PrROMVersion
-JMP ServExit
+            LDA  #&EA       ; check tube presence.
+            LDX  #&00
+            LDY  #&FF
+            JSR  OSBYTE
+            TXA
+            BEQ  skipmsg    ; skip if no tube.
+            LDX  #&00
+            LDA  tubemsg    ; print *HELP message.
+.tubemlp    JSR  OSWRCH
+            INX
+            LDA  tubemsg,X
+            BNE  tubemlp
+.skipmsg    JMP ServExit
 .L8538
 DEY:LDX #&FF
 .L853B
@@ -231,8 +251,11 @@ EQUB 13
 EQUS "Utility commands:":EQUB 13
 EQUS "  QUIT or DESKTOP : terminate emulator":EQUB 13
 EQUS "  DUMP : dump a file in hex and ASCII":EQUB 13
+EQUS "  LIST : list a file with line numbers":EQUB 13
 EQUS "  PAGE : force PAGE location":EQUB 13
+EQUS "  PRINT : display a file verbatim":EQUB 13
 EQUS "  SHADOW : dummy command":EQUB 13
+EQUS "  TYPE : display a file on screen":EQUB 13
 EQUB 13
 EQUS "Sideays RAM commands:":EQUB 13
 EQUS "  ROMS":EQUB 13
@@ -285,7 +308,7 @@ RTS
         STA PORT_CMD
         LDA #&00
         RTS
-        
+
 .srwrit LDA #&D1            :\ Pass to host and return
         STA PORT_CMD
         LDA #&00
@@ -297,7 +320,7 @@ RTS
         ENDMACRO
 
 .roms
-{        
+{
         LDA     #&aa
         LDX     #&00
         LDY     #&ff
@@ -479,9 +502,8 @@ RTS
         JSR     hexnyb
         PLA
         AND     #&0f
-.hexnyb CLC
-        ADC     #'0'
-        CMP     #'9'
+.hexnyb ORA     #'0'
+        CMP     #'9'+1
         BCC     ddig
         ADC     #&06
 .ddig   JMP     OSWRCH
@@ -497,9 +519,12 @@ RTS
 .found  LDA     #&00
         STA     dmpadd
         STA     dmpadd+1
+        STA     dmpadd+2
         BIT     &FF
         BMI     gotesc
-.linlp  LDA     dmpadd+1
+.linlp  LDA     dmpadd+2
+        JSR     hexbyt
+        LDA     dmpadd+1
         JSR     hexbyt
         LDA     dmpadd
         JSR     hexbyt
@@ -544,10 +569,167 @@ RTS
         CLC
         ADC     dmpadd
         STA     dmpadd
+        LDA     #&00
+        ADC     dmpadd+1
+        STA     dmpadd+1
         BCC     noinc
-        INC     dmpadd+1
+        INC     dmpadd+2
 .noinc  BIT     &FF
         BPL     linlp
+.gotesc LDA     #&7E
+        JSR     OSWRCH
+.eof    LDA     #&00
+        JMP     OSFIND
+}
+
+.bcdbyt PHA
+        PHP
+        LSR     A
+        LSR     A
+        LSR     A
+        LSR     A
+        PLP
+        JSR     bcdnyb
+        PLA
+.bcdnyb AND     #&0f
+        BNE     bcddig
+        BCC     bcddig
+        LDA     #' '
+        JSR     OSWRCH
+        SEC
+        RTS
+.bcddig ORA     #'0'
+        JSR     OSWRCH
+        CLC
+        RTS
+
+.outesc
+{
+        TAX
+        BMI     high
+.high2  CMP     #' '
+        BCC     low
+        INX
+        BMI     del
+        CMP     #'|'
+        BNE     notbar
+        JSR     OSWRCH
+.notbar JMP     OSWRCH
+.high   LDA     #'|'
+        JSR     OSWRCH
+        LDA     #'!'
+        JSR     OSWRCH
+        TXA
+        AND     #&7f
+        TAX
+        JMP     high2
+.low    ORA     #&40
+        TAX
+        LDA     #'|'
+        JSR     OSWRCH
+        TXA
+        JMP     OSWRCH
+.del    LDA     #'|'
+        JSR     OSWRCH
+        LDA     #'?'
+        JMP     OSWRCH
+}
+
+.list   LDA     #&00
+        STA     lineno
+        STA     lineno+1
+        STA     lineno+2
+        BEQ     lstype
+
+.type   LDA     #&80
+
+.lstype
+{
+        STA     ltflag
+        JSR     F2toXY
+        LDA     #&40
+        JSR     OSFIND
+        TAY
+        BNE     found
+        JMP     FileCmdNf
+.pline  TAX
+        SED
+        SEC
+        LDA     #&00
+        ADC     lineno
+        STA     lineno
+        LDA     #&00
+        ADC     lineno+1
+        STA     lineno+1
+        CLD
+        SEC
+        JSR     bcdbyt
+        LDA     lineno
+        PHP
+        LSR     A
+        LSR     A
+        LSR     A
+        LSR     A
+        PLP
+        JSR     bcdnyb
+        LDA     lineno
+        CLC
+        JSR     bcdnyb
+        LDA     #' '
+        JSR     OSWRCH
+        TXA
+.chrlp  CMP     #&0D
+        BEQ     newlin
+        CMP     #&0A
+        BEQ     newlin
+        STA     ltpchr
+        JSR     outesc
+.rdchr  JSR     OSBGET
+        BCC     chrlp
+.eof    JSR     OSNEWL
+        LDA     #&00
+        JMP     OSFIND
+.newlin CMP     ltpchr
+        BEQ     blalin
+        PHA
+        LDA     ltpchr
+        CMP     #&0D
+        BEQ     nl2nd
+        CMP     #&0A
+        BEQ     nl2nd
+        PLA
+        STA     ltpchr
+.blalin JSR     OSNEWL
+.found  BIT     &FF
+        BMI     gotesc
+        JSR     OSBGET
+        BCS     eof
+        BIT     ltflag
+        BMI     chrlp
+        BPL     pline
+.nl2nd  LDA     #&00
+        STA     ltpchr
+        PLA
+        JMP     rdchr
+.gotesc LDA     #&7E
+        JSR     OSBYTE
+        LDA     #&00
+        JMP     OSFIND
+}
+
+.print
+{
+        JSR     F2toXY
+        LDA     #&40
+        JSR     OSFIND
+        TAY
+        BNE     found
+        JMP     FileCmdNf
+.chrlp  JSR     OSWRCH
+        JSR     OSBGET
+        BCS     eof
+.found  BIT     &FF
+        BPL     chrlp
 .gotesc LDA     #&7E
         JSR     OSWRCH
 .eof    LDA     #&00
@@ -592,8 +774,9 @@ JSR OSNEWL:LDA #0:RTS
 \ --------------------------
 .ServVectors
 LDA #0:\STA FSFlag          :\ Clear FSflag, and exit
-.ServShut                   :\ Doesn't do anything
 JMP ServExit
+.ServShut                   :\ Close all open files
+LDA #&11:STA PORT_CMD:JMP ServExit
 .ServFSSelect
 CPY #vdfsno:BEQ FSSelect    :\ VDFS
 BIT ClaimFS:BPL FSSelectNone:\ If not claimed, don't check for DFS or ADFS
@@ -683,7 +866,7 @@ CMP #&03:BNE P%+5:JMP FSCommandLookup:\ Filing system commands
 CMP #&06:BNE FSCemul:LDA #&77:JSR OSBYTE:LDA#&06
 .FSCemul
 STA PORT_A:LDA #&00:STA PORT_CMD :\ Pass to emulator.
-BCS FSCtube                 :\ start execution in tube?	
+BCS FSCtube                 :\ start execution in tube?
 .FSCDone
 RTS
 .FSCtube		:\ claim the tube.
@@ -730,8 +913,7 @@ INX:INX:LDA FSCommands,X
 BNE L833C                   :\ Loop until terminator found
 .L8384                      :\ No match, pass to host to try
 PLA:TAY:PLA:TAX:PLA         :\ Restore registers
-STA PORT_A:LDA #&00:STA PORT_CMD :\ Pass FSC to host to try
-RTS                         :\ And return
+JMP FSCemul                 :\ Pass FSC to host to try
 \ ---------------------------
 \ Filing System Command Table
 \ ---------------------------
@@ -955,9 +1137,7 @@ RTS
 .ServOsword
 LDA &EF:CMP #127            :\ Check OSWORD number
 BNE P%+5:JSR Osword7F       :\ If FM disk access, play with memory
-PLA:TAY:PLA:TAX:PLA:PLP     :\ Restore registers
-STA PORT_A:LDA #&40:STA PORT_CMD :\Pass OSWORD call to emulator and return
-RTS	
+JMP ServExit
 \ -------------------------------------------------------------
 \ Corrupt bits of memory to simulate effects of real OSWORD &7F
 \ -------------------------------------------------------------
@@ -1022,6 +1202,56 @@ EQUB &A1:EQUB &A2:EQUB &A3:EQUB &A4:EQUB &A5:EQUB &A6
 EQUB &A7:EQUB &A8:EQUB &A9:EQUB &AA:EQUB &C8:EQUB &C9
 EQUB &D3:EQUB &D5:EQUB &D6:EQUB &DE:EQUB &DF:EQUB &E0
 EQUB &E1::EQUB 0
+
+include "tubehost.asm"
+
+.TubeInit
+{
+        LDA  #<TubeEvHnd    ; point EVENTV to tube host
+        STA  EVNTV
+        LDA  #>TubeEvHnd
+        STA  EVNTV+1
+        LDA  #<TubeBrkHnd   ; point BRKV to tube host
+        STA  BRKV
+        LDA  #>TubeBrkHnd
+        STA  BRKV+1
+        LDA  #&8E
+        STA  &FEE0
+        LDY  #&00           ; copy the tube host code into low memory
+.copy1  LDA  TubeHost1,Y
+        STA  &0400,Y
+        LDA  TubeHost2,Y
+        STA  &0500,Y
+        LDA  TubeHost3,Y
+        STA  &0600,Y
+        DEY
+        BNE  copy1
+        JSR  TubeCall
+        LDX  #TubeBrkLen
+.copyz  LDA  TubeHostZ,X
+        STA  TubeBrkHnd,X
+        DEX
+        BPL  copyz
+        JMP  ServClaim
+}
+
+.TubeExplode
+{
+        CPY  #&00
+        BEQ  notube         ; if no tube.
+        LDA  #&14           ; explode character set.
+        LDX  #&06
+        JSR  OSBYTE
+.imsglp BIT  &FEE0          ; wait for character to be send from tube
+        BPL  imsglp
+        LDA  &FEE1          ; fetch the character.
+        BEQ  done           ; end of message?
+        JSR  OSWRCH
+        JMP  imsglp
+.notube JMP  ServExit
+.done   JMP  ServClaim
+}
+
 .end
 ;
 SAVE "VDFS5", start, end

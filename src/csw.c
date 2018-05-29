@@ -19,7 +19,7 @@ static int      csw_skip = 0;
 static int      csw_loop = 1;
 int csw_ena;
 
-void csw_load(char *fn)
+void csw_load(const char *fn)
 {
         int end,c;
         uint32_t destlen = 8 * 1024 * 1024;
@@ -185,7 +185,6 @@ void csw_findfilenames()
         uint8_t status;
         int skip;
         if (!csw_dat) return;
-        startblit();
         temp    = csw_point;
         temps   = csw_indat;
         tempi   = csw_intone;
@@ -281,6 +280,5 @@ void csw_findfilenames()
         sysacia_tapespeed = tempspd;
         csw_point   = temp;
         csw_loop = 0;
-        endblit();
 }
 

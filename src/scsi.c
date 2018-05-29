@@ -47,20 +47,19 @@ Offset  Description                 Access
 
 #define SCSI_INT_NUM 16
 
-char scsi_enabled = 0;
+bool scsi_enabled = false;
 
 typedef enum {
 	busfree,
 	selection,
 	command,
 	execute,
-	read,
-	write,
+	scsiread,
+	scsiwrite,
 	status,
 	message
 } phase_t;
 
-#define bool int
 #define false 0
 #define true  1
 #define FALSE 0
@@ -198,7 +197,7 @@ static void RequestSense(void)
 	if (scsi.length > 0) {
 		scsi.offset = 0;
 		scsi.blocks = 1;
-		scsi.phase = read;
+		scsi.phase = scsiread;
 		scsi.io = TRUE;
 		scsi.cd = FALSE;
 
@@ -292,7 +291,7 @@ static void Read6(void)
 	scsi.offset = 0;
 	scsi.next = record + 1;
 
-	scsi.phase = read;
+	scsi.phase = scsiread;
 	scsi.io = true;
 	scsi.cd = false;
 
@@ -333,7 +332,7 @@ static void Write6(void)
 	scsi.next = record + 1;
 	scsi.offset = 0;
 
-	scsi.phase = write;
+	scsi.phase = scsiwrite;
 	scsi.cd = false;
 
 	scsi.req = true;
@@ -358,7 +357,7 @@ static void Translate(void)
 
 	scsi.offset = 0;
 	scsi.blocks = 1;
-	scsi.phase = read;
+	scsi.phase = scsiread;
 	scsi.io = TRUE;
 	scsi.cd = FALSE;
 
@@ -380,7 +379,7 @@ static void ModeSelect(void)
 	scsi.next = 0;
 	scsi.offset = 0;
 
-	scsi.phase = write;
+	scsi.phase = scsiwrite;
 	scsi.cd = false;
 
 	scsi.req = true;
@@ -455,7 +454,7 @@ static void ModeSense(void)
 	if (scsi.length > 0) {
 		scsi.offset = 0;
 		scsi.blocks = 1;
-		scsi.phase = read;
+		scsi.phase = scsiread;
 		scsi.io = TRUE;
 		scsi.cd = FALSE;
 
@@ -621,7 +620,7 @@ static void WriteData(int data)
 			}
 			return;
 
-		case write :
+		case scsiwrite :
 			scsi.buffer[scsi.offset] = data;
 			scsi.offset++;
 			scsi.length--;
@@ -738,7 +737,7 @@ static int ReadData(void)
 			BusFree();
 			return data;
 
-		case read :
+		case scsiread :
 			data = scsi.buffer[scsi.offset];
 			scsi.offset++;
 			scsi.length--;
@@ -817,13 +816,17 @@ static void scsi_init_lun(int lun)
         int size, cyl;
         FILE *dat, *dsc;
         char name[50], geom[22];
+        ALLEGRO_PATH *path;
+        const char *cpath;
 
         SCSISize[lun] = 0;
-        snprintf(name, sizeof(name), "scsi/scsi%d.dat", lun);
-        if ((dat = fopen(name, "rb+")))
-        {
-                strcpy(strchr(name, '.'), ".dsc");
-                if ((dsc = fopen(name, "rb+")))
+        snprintf(name, sizeof(name), "scsi/scsi%d", lun);
+        if ((path = find_cfg_file(name, ".dat"))) {
+            cpath = al_path_cstr(path, ALLEGRO_NATIVE_PATH_SEP);
+            if ((dat = fopen(cpath, "rb+"))) {
+                al_set_path_extension(path, ".dsc");
+                cpath = al_path_cstr(path, ALLEGRO_NATIVE_PATH_SEP);
+                if ((dsc = fopen(cpath, "rb+")))
                 {
                         if (fread(geom, sizeof geom, 1, dsc) == 1)
                         {
@@ -838,7 +841,7 @@ static void scsi_init_lun(int lun)
                         fclose(dsc);
                 }
                 else
-                        log_warn("scsi lun %d: unable to open dsc file %s: %s", lun, name, strerror(errno));
+                        log_warn("scsi lun %d: unable to open dsc file %s: %s", lun, cpath, strerror(errno));
                 if (SCSISize[lun] == 0)
                 {
                         SCSISize[lun] = size = fseek(dat, 0, SEEK_END);
@@ -854,9 +857,12 @@ static void scsi_init_lun(int lun)
                         }
                 }
                 SCSIDisc[lun] = dat;
-        }
-        else
-                log_warn("scsi lun %d: unable to open data file %s: %s", lun, name, strerror(errno));
+            }
+            else
+                log_error("scsi lun %d: unable to open data file %s: %s", lun, cpath, strerror(errno));
+            al_destroy_path(path);
+        } else
+            log_warn("scsi lun %d: no disc file %s found", lun, name);
 }
 
 void scsi_init(void)
